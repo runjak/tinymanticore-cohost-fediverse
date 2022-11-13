@@ -1,6 +1,10 @@
 {
+  "scripts": {
+    "auth": "node -r dotenv/config ./auth.mjs"
+  },
   "dependencies": {
-    "cohost": "^0.0.3"
+    "cohost": "^0.0.3",
+    "megalodon": "^4.1.1"
   },
   "devDependencies": {
     "dotenv": "^16.0.3"
