@@ -5,7 +5,7 @@
   },
   "dependencies": {
     "cohost": "^0.0.3",
-    "megalodon": "^4.1.1"
+    "masto": "^4.6.1"
   },
   "devDependencies": {
     "dotenv": "^16.0.3"
