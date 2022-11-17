@@ -1,5 +1,8 @@
-import cohost from "cohost";
-import { Mastodon } from "megalodon";
+import { createReadStream } from "fs";
+import { join } from "path";
+import { writeFile, mkdtemp, rm, rmdir } from "fs/promises";
+import cohost, { Post } from "cohost";
+import { login } from "masto";
 import { config } from "./config.mjs";
 
 const getCohostProject = async () => {
@@ -10,49 +13,134 @@ const getCohostProject = async () => {
   return projects.find((p) => p.handle === config.cohost.handle);
 };
 
-const getLastTwentyPosts = async (project) => {
-  return project.getPosts();
-};
+async function* cohostPosts() {
+  const project = await getCohostProject();
 
-const getLastPost = async (project) => {
-  const [somePost] = await project.getPosts();
-  return somePost;
-};
+  let page = 0;
+  while (true) {
+    const posts = await project.getPosts(page);
 
-const mastodon = new Mastodon(
-  config.mastodon.baseUrl,
-  config.mastodon.accessToken
-);
+    if (posts.length === 0) {
+      break;
+    }
 
-const getAccountId = async () => {
-  const { data: account } = await mastodon.verifyAccountCredentials();
-
-  if (!account.bot) {
-    console.log("FIXME mark as bot!");
-    // mastodon.updateCredentials({ bot: true })
+    yield* posts;
+    page += 1;
   }
+}
 
-  return account.id;
+const markCohostPostCrossposted = async (post, syncedUrl) =>
+  Post.update(post.project, post.id, {
+    postState: post.state,
+    headline: post.headline,
+    adultContent: post.effectiveAdultContent,
+    blocks: [
+      ...post.blocks,
+      {
+        type: "markdown",
+        markdown: {
+          content: `-----\n\nCrossposted to [${
+            new URL(syncedUrl).hostname
+          }](${syncedUrl})`,
+        },
+      },
+    ],
+    cws: post.cws,
+    tags: post.tags,
+  });
+
+const isCohostPostCrossposted = (post) =>
+  post.plainTextBody.includes(config.mastodon.baseUrl);
+
+const mastodonClientPromise = login({
+  url: config.mastodon.baseUrl,
+  accessToken: config.mastodon.accessToken,
+});
+
+const uploadMediaToMastodon = async (sourceUrl, description) => {
+  const response = await fetch(sourceUrl);
+
+  const tempDir = await mkdtemp("/tmp/");
+  const tempFile = join(tempDir, "buffer");
+
+  await writeFile(tempFile, response.body);
+
+  const mastodonClient = await mastodonClientPromise;
+  const attachment = await mastodonClient.mediaAttachments.create({
+    file: createReadStream(tempFile),
+    description,
+  });
+
+  rm(tempFile).then(() => rmdir(tempDir));
+
+  return attachment;
 };
+
+const crosspostToMastodon = async (post) => {
+  const { plainTextBody, blocks, singlePostPageUrl } = post;
+  const fromLine = `\n\nFrom: ${singlePostPageUrl}`;
+
+  const uploads = blocks
+    .filter(({ type }) => type === "attachment")
+    .map(({ attachment: { fileURL, altText } }) =>
+      uploadMediaToMastodon(fileURL, altText)
+    );
+  const uploadedAttachments = await Promise.all(uploads);
+
+  const mastodonClient = await mastodonClientPromise;
+  const status = await mastodonClient.statuses.create({
+    status: `${plainTextBody.substring(0, 500 - fromLine.length)}${fromLine}`,
+    mediaIds: Boolean(uploadedAttachments.length)
+      ? uploadedAttachments.map(({ id }) => id)
+      : undefined,
+  });
+
+  await markCohostPostCrossposted(post, status.url || status.uri);
+
+  const now = new Date().toISOString();
+  console.log(`${now}: Posted ${status.url || status.uri}`);
+  console.log(`${now}: Updated ${singlePostPageUrl}`);
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const main = async () => {
-  // const project = await getCohostProject();
+  while (true) {
+    try {
+      let postsToCrosspost = [];
+      for await (const post of cohostPosts()) {
+        if (isCohostPostCrossposted(post)) {
+          break;
+        } else {
+          postsToCrosspost.unshift(post);
+        }
+      }
 
-  // const post = await getLastPost(project);
+      console.log(
+        `${new Date().toISOString()}: Found ${
+          postsToCrosspost.length
+        } posts to crosspost.`
+      );
 
-  // console.log({
-  //   id: post.id,
-  //   plainTextBody: post.plainTextBody,
-  //   publishedAt: post.publishedAt,
-  //   filename: post.filename,
-  //   singlePostPageUrl: post.singlePostPageUrl
-  // });
-
-  // await mastodon.postStatus(`${post.plainTextBody}\n\nFrom: ${post.singlePostPageUrl}`)
-
-  const accountId = await getAccountId();
-  const statuses = await mastodon.getAccountStatuses(accountId);
-  console.log(statuses);
+      for (const post of postsToCrosspost) {
+        try {
+          await crosspostToMastodon(post);
+        } catch (e) {
+          console.error(
+            `${new Date().toISOString()}: Error in crosspostToMastodon for post ${
+              post.singlePostPageUrl
+            }:\n${e}`
+          );
+        } finally {
+          await sleep(60 * 1000);
+        }
+      }
+    } catch (e) {
+      console.error(`${new Date().toISOString()}: Error in main:\n${e}`);
+    } finally {
+      await sleep(9 * 60 * 1000);
+    }
+  }
 };
 
 main();

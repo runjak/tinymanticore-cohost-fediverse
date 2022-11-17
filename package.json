@@ -1,7 +1,6 @@
 {
   "scripts": {
-    "auth": "node -r dotenv/config ./auth.mjs",
-    "test:post-status": "node -r dotenv/config test-post-status.mjs"
+    "auth": "node -r dotenv/config ./auth.mjs"
   },
   "dependencies": {
     "cohost": "^0.0.3",
